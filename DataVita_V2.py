@@ -5,6 +5,7 @@ import sys
 import plotly.express as px
 import plotly.graph_objects as go
 from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 from io import BytesIO
 
 # ML libraries are imported lazily (only when ML pages are opened) to save RAM on Streamlit Cloud.
@@ -98,7 +99,39 @@ DB_PORT = _get_config("DB_PORT", "5432")
 DB_NAME = _get_config("DB_NAME", "Onlineshop")
 
 
+def _build_duck_engine(data_dir: Path):
+    """Parquet-backed DuckDB for Streamlit Cloud (shared in-memory via StaticPool)."""
+    duck_engine = create_engine(
+        "duckdb:///:memory:datavita",
+        poolclass=StaticPool,
+    )
+
+    table_to_files = {}
+    for parquet_file in sorted(data_dir.glob("*.parquet")):
+        table_name = parquet_file.stem.split("__part")[0]
+        table_to_files.setdefault(table_name, []).append(parquet_file)
+
+    if not table_to_files:
+        raise RuntimeError(f"No parquet files found in {data_dir}")
+
+    with duck_engine.begin() as conn:
+        for table_name, files in table_to_files.items():
+            if len(files) == 1:
+                source = f"read_parquet('{files[0].as_posix()}')"
+            else:
+                glob_path = (data_dir / f"{table_name}__part*.parquet").as_posix()
+                source = f"read_parquet('{glob_path}')"
+            conn.exec_driver_sql(
+                f'CREATE OR REPLACE VIEW "{table_name}" AS SELECT * FROM {source}'
+            )
+    return duck_engine
+
+
 def _build_engine():
+    data_dir = Path(__file__).parent / "data"
+    if data_dir.is_dir() and any(data_dir.glob("*.parquet")):
+        return _build_duck_engine(data_dir)
+
     pg_engine = create_engine(
         f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}",
         pool_size=5,
@@ -106,33 +139,15 @@ def _build_engine():
         connect_args={"connect_timeout": 3},
     )
     try:
-        with pg_engine.connect():
-            pass
+        with pg_engine.connect() as conn:
+            conn.exec_driver_sql("SELECT 1")
         return pg_engine
     except Exception:
-        pass
-
-    data_dir = Path(__file__).parent / "data"
-    duck_engine = create_engine("duckdb:///:memory:")
-
-    # Tables exported as a single file use their own name as the view name.
-    # Tables split by export_to_parquet.py (files named "<table>__partN")
-    # are grouped back together and read via a glob pattern.
-    table_to_files = {}
-    for parquet_file in sorted(data_dir.glob("*.parquet")):
-        table_name = parquet_file.stem.split("__part")[0]
-        table_to_files.setdefault(table_name, []).append(parquet_file)
-
-    with duck_engine.begin() as conn:
-        for table_name, files in table_to_files.items():
-            if len(files) == 1:
-                source = f"read_parquet('{files[0].as_posix()}')"
-            else:
-                source = f"read_parquet('{(data_dir / (table_name + '__part*.parquet')).as_posix()}')"
-            conn.exec_driver_sql(
-                f"CREATE OR REPLACE VIEW {table_name} AS SELECT * FROM {source}"
-            )
-    return duck_engine
+        if data_dir.is_dir() and any(data_dir.glob("*.parquet")):
+            return _build_duck_engine(data_dir)
+        raise RuntimeError(
+            "No database available: PostgreSQL unreachable and no ./data/*.parquet files found."
+        )
 
 
 @st.cache_resource(show_spinner=False)
@@ -1357,7 +1372,7 @@ def load_data():
             u.age, u.gender, u.city, u.country,
             u.latitude, u.longitude, u.traffic_source
         FROM order_items oi
-        JOIN product p ON oi.product_id = p.id
+        JOIN "product" p ON oi.product_id = p.id
         LEFT JOIN users u ON oi.user_id = u.id
     """, ENGINE)
 
