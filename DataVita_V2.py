@@ -171,6 +171,52 @@ html, body, [class*="css"], .stMarkdown, .stText, p, span, div, label {
     font-family: 'Inter', system-ui, -apple-system, sans-serif !important;
 }
 
+/* Hide Streamlit's built-in "show password" icon button — its icon font
+   sometimes fails to load and shows the literal word "visibility" instead
+   of the eye icon. We provide our own "Passwort anzeigen" checkbox instead. */
+[data-testid="stTextInputRevealButton"],
+[data-testid="stTextInput"] button[aria-label*="password" i],
+[data-testid="stTextInput"] button[title*="password" i] {
+    display: none !important;
+}
+
+/* Force readable text in ALL Streamlit text inputs (login, forms, etc.).
+   A later theme block was setting color: #f1f5f9 (light) on white inputs,
+   which made typed text and password dots invisible. */
+[data-testid="stTextInput"] [data-baseweb="input"],
+[data-testid="stTextInput"] [data-baseweb="input"] > div,
+div[data-testid="stForm"] [data-baseweb="input"],
+div[data-testid="stForm"] [data-baseweb="input"] > div {
+    background-color: #ffffff !important;
+    border: 1px solid #cbd5e1 !important;
+    border-radius: 10px !important;
+}
+[data-testid="stTextInput"] input,
+div[data-testid="stForm"] input {
+    color: #0f172a !important;
+    -webkit-text-fill-color: #0f172a !important;
+    background-color: #ffffff !important;
+    caret-color: #0f172a !important;
+    font-size: 15px !important;
+}
+[data-testid="stTextInput"] input::placeholder,
+div[data-testid="stForm"] input::placeholder {
+    color: #94a3b8 !important;
+    -webkit-text-fill-color: #94a3b8 !important;
+    opacity: 1 !important;
+}
+[data-testid="stTextInput"] input:-webkit-autofill,
+[data-testid="stTextInput"] input:-webkit-autofill:hover,
+[data-testid="stTextInput"] input:-webkit-autofill:focus,
+div[data-testid="stForm"] input:-webkit-autofill,
+div[data-testid="stForm"] input:-webkit-autofill:hover,
+div[data-testid="stForm"] input:-webkit-autofill:focus {
+    -webkit-text-fill-color: #0f172a !important;
+    -webkit-box-shadow: 0 0 0px 1000px #ffffff inset !important;
+    box-shadow: 0 0 0px 1000px #ffffff inset !important;
+    transition: background-color 5000s ease-in-out 0s;
+}
+
 /* ── Dark Background ── */
 .stApp {
     background: #0b0f19;
@@ -4483,8 +4529,14 @@ def page_login():
 
         st.markdown('<div class="glass lp-form">', unsafe_allow_html=True)
 
-        login_user = st.text_input("Benutzername", placeholder="Benutzername", key="login_user")
-        login_pass = st.text_input("Passwort", type="password", placeholder="••••••••", key="login_pass")
+        login_user = st.text_input("Benutzername", placeholder="admin", key="login_user")
+        login_pass = st.text_input(
+            "Passwort",
+            type="default" if st.session_state.get("show_pw_login", False) else "password",
+            placeholder="admin123",
+            key="login_pass",
+        )
+        st.checkbox("Passwort anzeigen", key="show_pw_login")
 
         if st.button("Anmelden →", use_container_width=True, type="primary"):
             if login_user == VALID_USER and login_pass == VALID_PASS:
@@ -4502,7 +4554,7 @@ def page_login():
         st.markdown(f"""
         <div style="text-align:center; margin-top:12px;">
             <span style="font-size:10.5px; color:{C['dim']};">
-                ⚠️ Demo-Login · Produktiv: Backend-Auth verwenden
+                Demo-Zugang: admin / admin123
             </span>
         </div>""", unsafe_allow_html=True)
 
@@ -4788,11 +4840,16 @@ def page_startseite():
       letter-spacing: 1px !important; color: var(--dv-dim) !important;
     }
     div[data-testid="stForm"] [data-baseweb="input"] > div {
-      background: rgba(15,22,41,0.8) !important;
-      border: 1px solid rgba(55,65,81,0.5) !important;
+      background: #ffffff !important;
+      border: 1px solid #cbd5e1 !important;
       border-radius: 10px !important;
     }
-    div[data-testid="stForm"] input { color: var(--dv-text) !important; }
+    div[data-testid="stForm"] input {
+      color: #0f172a !important;
+      -webkit-text-fill-color: #0f172a !important;
+      background-color: #ffffff !important;
+      caret-color: #0f172a !important;
+    }
     div[data-testid="stForm"] [data-testid="stFormSubmitButton"] button {
       width: 100% !important; margin-top: 8px !important; min-height: 48px !important;
       background: linear-gradient(135deg, var(--dv-indigo), var(--dv-violet)) !important;
@@ -5003,40 +5060,40 @@ def page_startseite():
             """, unsafe_allow_html=True)
 
         with form_col:
-            with st.form("dv_login_form", clear_on_submit=False):
-                st.markdown(r"""
-                <div class="dv-page dv-login-head">
-                  <div class="dv-login-lock">🔐</div>
-                  <h3>Kunden-Login</h3>
-                  <div class="dv-login-hint">Zugang zum Analytics-Dashboard</div>
-                </div>
-                """, unsafe_allow_html=True)
-                login_user = st.text_input(
-                    "Benutzername",
-                    placeholder="Benutzername",
-                    key="dv_login_user",
-                )
-                login_pass = st.text_input(
-                    "Passwort",
-                    type="password",
-                    placeholder="••••••••",
-                    key="dv_login_pass",
-                )
-                submitted = st.form_submit_button("Anmelden →", use_container_width=True)
+            st.markdown(r"""
+            <div class="dv-page dv-login-head">
+              <div class="dv-login-lock">🔐</div>
+              <h3>Kunden-Login</h3>
+              <div class="dv-login-hint">Zugang zum Analytics-Dashboard</div>
+            </div>
+            """, unsafe_allow_html=True)
 
-                if submitted:
-                    if login_user == VALID_USER and login_pass == VALID_PASS:
-                        st.session_state.logged_in = True
-                        st.session_state.login_user = login_user
-                        st.session_state.project_selected = False
-                        st.rerun()
-                    elif not login_user or not login_pass:
-                        st.error("Bitte Benutzername und Passwort eingeben.")
-                    else:
-                        st.error("Zugangsdaten nicht korrekt — bitte erneut versuchen.")
+            login_user = st.text_input(
+                "Benutzername",
+                placeholder="admin",
+                key="dv_login_user",
+            )
+            login_pass = st.text_input(
+                "Passwort",
+                type="default" if st.session_state.get("show_pw_dv_login", False) else "password",
+                placeholder="admin123",
+                key="dv_login_pass",
+            )
+            st.checkbox("Passwort anzeigen", key="show_pw_dv_login")
+
+            if st.button("Anmelden →", use_container_width=True, type="primary", key="dv_login_submit"):
+                if login_user == VALID_USER and login_pass == VALID_PASS:
+                    st.session_state.logged_in = True
+                    st.session_state.login_user = login_user
+                    st.session_state.project_selected = False
+                    st.rerun()
+                elif not login_user or not login_pass:
+                    st.error("Bitte Benutzername und Passwort eingeben.")
+                else:
+                    st.error("Zugangsdaten nicht korrekt — bitte erneut versuchen.")
 
             st.markdown(r"""
-            <div class="dv-page dv-demo-hint">⚠️ Demo-Login · Produktiv: Backend-Auth verwenden</div>
+            <div class="dv-page dv-demo-hint">Demo-Zugang: admin / admin123</div>
             """, unsafe_allow_html=True)
 
     st.markdown(r"""
