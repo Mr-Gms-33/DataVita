@@ -39,27 +39,77 @@ st.set_page_config(
 )
 
 # ╔═══════════════════════════════════════════════════════════╗
-#  DATABASE — Local PostgreSQL
-#  Credentials are loaded from environment variables (.env locally,
-#  Streamlit secrets/host env vars in deployment) — never hard-coded.
+#  DATABASE — PostgreSQL locally, bundled Parquet+DuckDB in the cloud
+#  Credentials come from .env locally, or from Streamlit Cloud's
+#  "Secrets" (st.secrets) when deployed — never hard-coded.
+#
+#  If no live Postgres is reachable (e.g. on Streamlit Community Cloud,
+#  which can't see your local database), the app automatically falls
+#  back to the Parquet snapshots in ./data/ via an in-memory DuckDB
+#  engine, so the same pd.read_sql(query, ENGINE) calls keep working.
 # ╚═══════════════════════════════════════════════════════════╝
 import os
+from pathlib import Path
+
 from dotenv import load_dotenv
 
 load_dotenv()
 
-DB_USER = os.getenv("DB_USER", "postgres")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "")
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_PORT = os.getenv("DB_PORT", "5432")
-DB_NAME = os.getenv("DB_NAME", "Onlineshop")
 
-ENGINE = create_engine(
-    f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}",
-    pool_size=5,
-    pool_pre_ping=True,
-    pool_recycle=300,
-)
+def _get_config(key: str, default: str = "") -> str:
+    try:
+        if key in st.secrets:
+            return st.secrets[key]
+    except Exception:
+        pass
+    return os.getenv(key, default)
+
+
+DB_USER = _get_config("DB_USER", "postgres")
+DB_PASSWORD = _get_config("DB_PASSWORD", "")
+DB_HOST = _get_config("DB_HOST", "localhost")
+DB_PORT = _get_config("DB_PORT", "5432")
+DB_NAME = _get_config("DB_NAME", "Onlineshop")
+
+
+def _build_engine():
+    pg_engine = create_engine(
+        f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}",
+        pool_size=5,
+        pool_pre_ping=True,
+        connect_args={"connect_timeout": 3},
+    )
+    try:
+        with pg_engine.connect():
+            pass
+        return pg_engine
+    except Exception:
+        pass
+
+    data_dir = Path(__file__).parent / "data"
+    duck_engine = create_engine("duckdb:///:memory:")
+
+    # Tables exported as a single file use their own name as the view name.
+    # Tables split by export_to_parquet.py (files named "<table>__partN")
+    # are grouped back together and read via a glob pattern.
+    table_to_files = {}
+    for parquet_file in sorted(data_dir.glob("*.parquet")):
+        table_name = parquet_file.stem.split("__part")[0]
+        table_to_files.setdefault(table_name, []).append(parquet_file)
+
+    with duck_engine.begin() as conn:
+        for table_name, files in table_to_files.items():
+            if len(files) == 1:
+                source = f"read_parquet('{files[0].as_posix()}')"
+            else:
+                source = f"read_parquet('{(data_dir / (table_name + '__part*.parquet')).as_posix()}')"
+            conn.exec_driver_sql(
+                f"CREATE OR REPLACE VIEW {table_name} AS SELECT * FROM {source}"
+            )
+    return duck_engine
+
+
+ENGINE = _build_engine()
 
 # ╔═══════════════════════════════════════════════════════════╗
 #  DESIGN SYSTEM

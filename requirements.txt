@@ -7,3 +7,6 @@ psycopg2-binary
 python-dotenv
 scikit-learn
 imbalanced-learn
+duckdb
+duckdb-engine
+pyarrow
