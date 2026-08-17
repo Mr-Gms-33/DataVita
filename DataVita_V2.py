@@ -7,26 +7,52 @@ import plotly.graph_objects as go
 from sqlalchemy import create_engine
 from io import BytesIO
 
-# ── ML Imports (einmalig beim Start, nicht bei jedem Seitenwechsel) ──
-try:
+# ML libraries are imported lazily (only when ML pages are opened) to save RAM on Streamlit Cloud.
+_SKLEARN_OK = None
+_SMOTE_OK = None
 
-    from sklearn.ensemble import (RandomForestClassifier, GradientBoostingClassifier)
-    from sklearn.linear_model import LinearRegression, LogisticRegression
-    from sklearn.model_selection import (train_test_split, StratifiedKFold,
-                                         cross_val_score)
-    from sklearn.metrics import (accuracy_score, confusion_matrix, precision_score,
-                                 recall_score, f1_score, roc_auc_score, roc_curve,
-                                 mean_absolute_percentage_error)
-    from sklearn.preprocessing import StandardScaler
-    _SKLEARN_OK = True
-except ImportError:
-    _SKLEARN_OK = False
 
-try:
-    from imblearn.over_sampling import SMOTE
-    _SMOTE_OK = True
-except ImportError:
-    _SMOTE_OK = False
+def _ensure_sklearn():
+    global _SKLEARN_OK, _SMOTE_OK
+    if _SKLEARN_OK is not None:
+        return _SKLEARN_OK
+    try:
+        from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+        from sklearn.linear_model import LinearRegression, LogisticRegression
+        from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
+        from sklearn.metrics import (
+            accuracy_score, confusion_matrix, precision_score, recall_score,
+            f1_score, roc_auc_score, roc_curve, mean_absolute_percentage_error,
+        )
+        from sklearn.preprocessing import StandardScaler
+        globals().update({
+            "RandomForestClassifier": RandomForestClassifier,
+            "GradientBoostingClassifier": GradientBoostingClassifier,
+            "LinearRegression": LinearRegression,
+            "LogisticRegression": LogisticRegression,
+            "train_test_split": train_test_split,
+            "StratifiedKFold": StratifiedKFold,
+            "cross_val_score": cross_val_score,
+            "accuracy_score": accuracy_score,
+            "confusion_matrix": confusion_matrix,
+            "precision_score": precision_score,
+            "recall_score": recall_score,
+            "f1_score": f1_score,
+            "roc_auc_score": roc_auc_score,
+            "roc_curve": roc_curve,
+            "mean_absolute_percentage_error": mean_absolute_percentage_error,
+            "StandardScaler": StandardScaler,
+        })
+        _SKLEARN_OK = True
+    except ImportError:
+        _SKLEARN_OK = False
+    try:
+        from imblearn.over_sampling import SMOTE
+        globals()["SMOTE"] = SMOTE
+        _SMOTE_OK = True
+    except ImportError:
+        _SMOTE_OK = False
+    return _SKLEARN_OK
 
 # ╔═══════════════════════════════════════════════════════════╗
 #  CONFIG
@@ -109,7 +135,12 @@ def _build_engine():
     return duck_engine
 
 
-ENGINE = _build_engine()
+@st.cache_resource(show_spinner=False)
+def get_engine():
+    return _build_engine()
+
+
+ENGINE = get_engine()
 
 # ╔═══════════════════════════════════════════════════════════╗
 #  DESIGN SYSTEM
@@ -1236,12 +1267,13 @@ def order_funnel(df_status):
 
 def event_funnel(df_events):
     order = ["home", "department", "product", "cart", "purchase"]
-    stage_map = {s: i for i, s in enumerate(order)}
     df = df_events.copy()
-    df["event_type"] = df["event_type"].str.lower()
-    # Einfache Zählung: Unique Sessions pro Event-Typ
-    counts = df.groupby("event_type")["session_id"].nunique().reset_index(name="events")
-    # Nur gültige Stufen behalten und sortieren
+    if "events" in df.columns and "session_id" not in df.columns:
+        counts = df.copy()
+        counts["event_type"] = counts["event_type"].str.lower()
+    else:
+        df["event_type"] = df["event_type"].str.lower()
+        counts = df.groupby("event_type")["session_id"].nunique().reset_index(name="events")
     counts = counts[counts["event_type"].isin(order)]
     counts["event_type"] = pd.Categorical(counts["event_type"], categories=order, ordered=True)
     counts = counts.sort_values("event_type")
@@ -1282,6 +1314,36 @@ if "project_selected" not in st.session_state:
 # ╔═══════════════════════════════════════════════════════════╗
 #  DATA LOAD 
 # ╚═══════════════════════════════════════════════════════════╝
+def _events_year_clause(years):
+    if not years:
+        return ""
+    year_list = ", ".join(str(int(y)) for y in years)
+    return f" AND EXTRACT(YEAR FROM created_at) IN ({year_list})"
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_event_funnel_stats(selected_years_key):
+    """Load only aggregated event metrics — avoids pulling 2.4M rows into RAM."""
+    years = list(selected_years_key)
+    year_clause = _events_year_clause(years)
+    funnel = pd.read_sql(f"""
+        SELECT event_type, COUNT(DISTINCT session_id) AS events
+        FROM events
+        WHERE 1=1 {year_clause}
+        GROUP BY event_type
+    """, ENGINE)
+    stats = pd.read_sql(f"""
+        SELECT
+            COUNT(DISTINCT session_id) AS total_sessions,
+            SUM(CASE WHEN lower(event_type) = 'purchase' THEN 1 ELSE 0 END) AS purchase_events
+        FROM events
+        WHERE 1=1 {year_clause}
+    """, ENGINE)
+    total_sessions = int(stats.iloc[0]["total_sessions"] or 0)
+    purchase_events = int(stats.iloc[0]["purchase_events"] or 0)
+    return funnel, total_sessions, purchase_events
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_data():
     sales = pd.read_sql("""
@@ -1299,12 +1361,6 @@ def load_data():
         LEFT JOIN users u ON oi.user_id = u.id
     """, ENGINE)
 
-    events = pd.read_sql("""
-        SELECT user_id, session_id, created_at, event_type,
-               city, state, postal_code, browser, traffic_source
-        FROM events
-    """, ENGINE)
-
     distribution_centers = pd.read_sql("""
         SELECT id, name, latitude, longitude
         FROM distribution_centers
@@ -1312,33 +1368,29 @@ def load_data():
 
     users_df = pd.read_sql("""
         SELECT id, first_name, last_name, age, gender, city,
-               country, latitude, longitude, traffic_source, created_at
+               country, traffic_source
         FROM users
     """, ENGINE)
 
-    
     for col in ["created_at", "shipped_at", "delivered_at", "returned_at"]:
         sales[col] = pd.to_datetime(sales[col], errors="coerce")
-    events["created_at"] = pd.to_datetime(events["created_at"], errors="coerce")
     sales["profit"] = sales["sale_price"] - sales["product_cost"]
     _status = sales["status"].astype(str).str.lower()
     sales["is_returned"] = (_status == "returned").astype(int)
     sales["is_complete"] = (_status == "complete").astype(int)
     sales["delivery_days"] = (sales["delivered_at"] - sales["shipped_at"]).dt.days
     sales["ship_days"] = (sales["shipped_at"] - sales["created_at"]).dt.days
-   
+
     sales["_year"] = sales["created_at"].dt.year
     sales["_is_cs"] = _status.isin(["complete", "shipped"]).to_numpy()
-    events["_year"] = events["created_at"].dt.year
-    return sales, events, distribution_centers, users_df
+    return sales, distribution_centers, users_df
 
 if st.session_state.logged_in and st.session_state.project_selected:
     if ("sales" not in st.session_state or "filter_opts" not in st.session_state
             or "_year" not in st.session_state.sales.columns):
         with st.spinner("⏳ Daten werden geladen..."):
-            _s, _e, _d, _u = load_data()
+            _s, _d, _u = load_data()
             st.session_state.sales = _s
-            st.session_state.events = _e
             st.session_state.dist_centers = _d
             st.session_state.users = _u
            
@@ -1353,7 +1405,6 @@ if st.session_state.logged_in and st.session_state.project_selected:
             }
 
     sales = st.session_state.sales
-    events = st.session_state.events
     dist_centers = st.session_state.dist_centers
     users = st.session_state.users
 
@@ -1470,13 +1521,11 @@ if st.session_state.logged_in and st.session_state.project_selected:
     if selected_status:      fs = fs[fs["status"].isin(selected_status)]
 
     uids = fs["user_id"].dropna().unique()
-    fe = events[events["user_id"].isin(uids)]
     fu = users[users["id"].isin(uids)]
     cs = fs[fs["_is_cs"]]
 
-    fe_all = events
-    if selected_years:
-        fe_all = fe_all[fe_all["_year"].isin(selected_years)]
+    _years_key = tuple(sorted(int(y) for y in selected_years)) if selected_years else ()
+    event_funnel_counts, event_total_sessions, event_purchase_count = load_event_funnel_stats(_years_key)
 
     annual_fs = sales
     if selected_countries:   annual_fs = annual_fs[annual_fs["country"].isin(selected_countries)]
@@ -1614,6 +1663,8 @@ def build_churn_dataset(_sales, _users):
 
 @st.cache_resource(show_spinner=False)
 def train_churn_models(_X_hash, _X_vals, _y_vals, _features):
+    if not _ensure_sklearn():
+        raise ImportError("scikit-learn is not installed")
     X_df = pd.DataFrame(_X_vals, columns=_features)
     y_s = pd.Series(_y_vals)
     sc = StandardScaler()
@@ -2604,12 +2655,9 @@ def page_customers():
     with c1:
         st.markdown('<div class="glass">', unsafe_allow_html=True)
         sec("Conversion Funnel", C["emerald"])
-        fig, _ = event_funnel(fe_all)
+        fig, _ = event_funnel(event_funnel_counts)
         st.plotly_chart(fig, use_container_width=True)
-        ev = fe_all.groupby("event_type").size().reset_index(name="events")
-        pc = ev.loc[ev["event_type"].str.lower() == "purchase", "events"].sum()
-        sc = fe_all["session_id"].nunique() if "session_id" in fe_all.columns else len(fe_all)
-        conv = (pc / sc * 100) if sc else 0
+        conv = (event_purchase_count / event_total_sessions * 100) if event_total_sessions else 0
         mini("Conversion Rate", pct(conv), C["emerald"])
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -4023,7 +4071,7 @@ def page_forecast_prediction():
 def page_churn_prediction():
     render_header("⚠️ Churn Prediction", analysis=False)
 
-    if not _SKLEARN_OK:
+    if not _ensure_sklearn():
         st.error("Scikit-Learn ist nicht installiert. `pip install scikit-learn`")
         st.stop()
 
